@@ -6,6 +6,15 @@ type WinnowError = ErrMode<ContextError>;
 pub enum Error {
     ReadError(std::io::Error),
     ParseError(WinnowError),
+    ConfigError(String),
+}
+impl Error {
+    pub fn config_error<T>(x: T) -> Self
+    where
+        T: Into<String>,
+    {
+        Self::ConfigError(x.into())
+    }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
