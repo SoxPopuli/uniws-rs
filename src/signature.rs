@@ -1,10 +1,62 @@
-use crate::patch_info::MatchType;
+use crate::error::Error;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum MatchType {
+    Exact,
+    Wild,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Signature {
     pub pattern: Vec<Option<u8>>,
 }
 impl Signature {
+    pub fn from_string(section: &str, signature: &str, sigwild: &str) -> Result<Self, Error> {
+        fn read_sig(section: &str, sig: &str) -> Result<Vec<u8>, Error> {
+            (0..sig.len())
+                .step_by(2)
+                .map(|x| {
+                    if x + 1 >= sig.len() {
+                        return Err(Error::config_field_parse(
+                            section,
+                            "sig",
+                            "Invalid hex string length",
+                        ));
+                    }
+
+                    let byte_pair = &sig[x..=x + 1];
+
+                    u8::from_str_radix(byte_pair, 16).map_err(|_| {
+                        Error::config_field_parse(
+                            section,
+                            "sig",
+                            format!("Invalid hex byte pair: {byte_pair}"),
+                        )
+                    })
+                })
+                .collect()
+        }
+
+        fn read_sigwild(section: &str, sigwild: &str) -> Result<Vec<MatchType>, Error> {
+            sigwild
+                .chars()
+                .map(|c| match c {
+                    '0' => Ok(MatchType::Exact),
+                    '1' => Ok(MatchType::Wild),
+                    x => Err(Error::config_field_parse(
+                        section,
+                        "sigwild",
+                        format!("Invalid sigwild character: {x}"),
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()
+        }
+
+        let sig = read_sig(section, signature)?;
+        let sigwild = read_sigwild(section, sigwild)?;
+        Ok(Self::new(&sig, &sigwild))
+    }
+
     pub fn new(signature: &[u8], sigwild: &[MatchType]) -> Self {
         assert_eq!(signature.len(), sigwild.len());
 
@@ -88,6 +140,11 @@ mod tests {
             None, None,
             Some(0xE0), Some(0x01), Some(0x00), Some(0x00), 
         ]);
+
+        let sig_from_string =
+            Signature::from_string("test", "80020000C701E0010000", "0000110000").unwrap();
+
+        assert_eq!(sig, sig_from_string);
     }
 
     #[test]

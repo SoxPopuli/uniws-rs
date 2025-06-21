@@ -1,18 +1,15 @@
-use crate::{config::Items, error::Error};
-use std::io::{ Write, Read, Seek };
+use crate::{
+    config::Items,
+    error::Error,
+    signature::{MatchType, Signature},
+};
+use std::io::{Read, Seek, Write};
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum MatchType {
-    Exact,
-    Wild,
-}
-
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PatchInfo {
     pub modfile: String,
     pub undofile: Option<String>,
-    pub sig: Vec<u8>,
-    pub sigwild: Vec<MatchType>,
+    pub signature: Signature,
     pub xoffset: Option<u64>,
     pub yoffset: Option<u64>,
     pub occur: u32,
@@ -60,51 +57,15 @@ impl PatchInfo {
             index,
         };
 
-        fn read_sig(section: &str, sig: &str) -> Result<Vec<u8>, Error> {
-            (0..sig.len())
-                .step_by(2)
-                .map(|x| {
-                    if x + 1 >= sig.len() {
-                        return Err(Error::config_field_parse(
-                            section,
-                            "sig",
-                            "Invalid hex string length".to_string(),
-                        ));
-                    }
+        let sig = field_name("sig");
+        let sigwild = field_name("sigwild");
 
-                    let byte_pair = &sig[x..=x + 1];
-
-                    u8::from_str_radix(byte_pair, 16).map_err(|_| {
-                        Error::config_field_parse(
-                            section,
-                            "sig",
-                            format!("Invalid hex byte pair: {byte_pair}"),
-                        )
-                    })
-                })
-                .collect()
-        }
-
-        let sig = { field_name("sig").get().and_then(|x| read_sig(section, x)) }?;
-
-        let sigwild = field_name("sigwild").get().and_then(|sigwild| {
-            sigwild
-                .chars()
-                .map(|c| match c {
-                    '0' => Ok(MatchType::Exact),
-                    '1' => Ok(MatchType::Wild),
-                    x => Err(Error::config_error(format!(
-                        "Invalid sigwild character: {x}"
-                    ))),
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })?;
+        let signature = Signature::from_string(section, sig.get()?, sigwild.get()?)?;
 
         Ok(Self {
+            signature,
             modfile: field_name("modfile").get().cloned()?,
             undofile: field_name("undofile").get().cloned().ok(),
-            sig,
-            sigwild,
             xoffset: field_name("xoffset").parse().ok(),
             yoffset: field_name("yoffset").parse().ok(),
             occur: field_name("occur").parse()?,
@@ -113,8 +74,42 @@ impl PatchInfo {
         })
     }
 
-    pub fn apply_patch<T>(&self, file: T) where T: Read + Write + Seek {
+    /// Returns `true` if applied successfully
+    #[must_use = "Should handle failure case"]
+    pub fn apply_patch(&self, data: &mut [u8], x_res: u16, y_res: u16) -> bool {
+        let mut data = data;
 
+        for _ in 0..self.occur {
+            match self.signature.try_find(data) {
+                Some(index) => {
+                    let x_bytes = x_res.to_le_bytes();
+                    let y_bytes = y_res.to_le_bytes();
+                    println!(
+                        "x: [{:0x}, {:0x}], y: [{:0x}, {:0x}]",
+                        x_bytes[0], x_bytes[1], y_bytes[0], y_bytes[1],
+                    );
+
+                    if let Some(xoffset) = self.xoffset {
+                        let x_offset = index + xoffset as usize;
+
+                        data[x_offset] = x_bytes[0];
+                        data[x_offset + 1] = x_bytes[1];
+                    }
+
+                    if let Some(yoffset) = self.yoffset {
+                        let y_offset = index + yoffset as usize;
+
+                        data[y_offset] = y_bytes[0];
+                        data[y_offset + 1] = y_bytes[1];
+                    }
+
+                    data = &mut data[index + self.signature.pattern.len()..]
+                }
+                None => return false,
+            }
+        }
+
+        true
     }
 }
 
@@ -191,5 +186,45 @@ mod tests {
         PatchInfo::from_items(section, &items, Some(3)).unwrap();
         PatchInfo::from_items(section, &items, Some(4)).unwrap();
         PatchInfo::from_items(section, &items, Some(5)).unwrap();
+    }
+
+    #[test]
+    fn apply_test() {
+        let info = PatchInfo {
+            signature: Signature::from_string("test", "80020000C701E0010000", "0000110000")
+                .unwrap(),
+            xoffset: Some(0),
+            yoffset: Some(6),
+            occur: 2,
+            ..Default::default()
+        };
+
+        #[rustfmt::skip]
+        let mut data = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+
+            0x80, 0x02, 0x00, 0x00, 0xC7, 0x01, 0xE0, 0x01, 0x00, 0x00,
+
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+
+            0x80, 0x02, 0x00, 0x00, 0xC7, 0x01, 0xE0, 0x01, 0x00, 0x00,
+        ];
+
+        assert!(info.apply_patch(&mut data, 1920, 1080));
+
+        #[rustfmt::skip]
+        assert_eq!(data.as_slice(), [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+
+            0x80, 0x07, 0x00, 0x00, 0xC7, 0x01, 0x38, 0x04, 0x00, 0x00,
+
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+
+            0x80, 0x07, 0x00, 0x00, 0xC7, 0x01, 0x38, 0x04, 0x00, 0x00,
+        ]);
     }
 }
