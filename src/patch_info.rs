@@ -1,11 +1,6 @@
-use crate::{
-    config::Items,
-    error::Error,
-    signature::{MatchType, Signature},
-};
-use std::io::{Read, Seek, Write};
+use crate::{config::Items, error::Error, signature::Signature};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct PatchInfo {
     pub modfile: String,
     pub undofile: Option<String>,
@@ -75,19 +70,14 @@ impl PatchInfo {
     }
 
     /// Returns `true` if applied successfully
-    #[must_use = "Should handle failure case"]
-    pub fn apply_patch(&self, data: &mut [u8], x_res: u16, y_res: u16) -> bool {
-        let mut data = data;
+    pub fn apply_patch(&self, data: &mut [u8], x_res: u16, y_res: u16) -> Result<(), Error> {
+        // let mut data = data;
 
         for _ in 0..self.occur {
             match self.signature.try_find(data) {
                 Some(index) => {
                     let x_bytes = x_res.to_le_bytes();
                     let y_bytes = y_res.to_le_bytes();
-                    println!(
-                        "x: [{:0x}, {:0x}], y: [{:0x}, {:0x}]",
-                        x_bytes[0], x_bytes[1], y_bytes[0], y_bytes[1],
-                    );
 
                     if let Some(xoffset) = self.xoffset {
                         let x_offset = index + xoffset as usize;
@@ -103,13 +93,12 @@ impl PatchInfo {
                         data[y_offset + 1] = y_bytes[1];
                     }
 
-                    data = &mut data[index + self.signature.pattern.len()..]
+                    // data = &mut data[index + self.signature.pattern.len()..];
                 }
-                None => return false,
+                None => return Err(Error::config_error("Failed to apply patch")),
             }
         }
-
-        true
+        Ok(())
     }
 }
 
@@ -212,7 +201,7 @@ mod tests {
             0x80, 0x02, 0x00, 0x00, 0xC7, 0x01, 0xE0, 0x01, 0x00, 0x00,
         ];
 
-        assert!(info.apply_patch(&mut data, 1920, 1080));
+        assert!(info.apply_patch(&mut data, 1920, 1080).is_ok());
 
         #[rustfmt::skip]
         assert_eq!(data.as_slice(), [

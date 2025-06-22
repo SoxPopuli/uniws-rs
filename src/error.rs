@@ -2,7 +2,8 @@ use winnow::error::{ContextError, ErrMode};
 
 type WinnowError = ErrMode<ContextError>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ConfigError {
     MissingRequiredField{ section: String, field: &'static str },
     FieldParseError { section: String, field: &'static str, msg: String },
@@ -10,11 +11,13 @@ pub enum ConfigError {
 }
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Debug)]
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub enum Error {
-    ReadError(std::io::Error),
+    ReadError(std::io::ErrorKind),
     ParseError(WinnowError),
     ConfigError(ConfigError),
+    StateError(String),
 }
 impl Error {
     pub fn config_missing_field(section: impl Into<String>, field: &'static str) -> Self {
@@ -36,6 +39,10 @@ impl Error {
             msg: msg.into(),
         })
     }
+
+    pub fn state_error(msg: impl Into<String>) -> Self {
+        Self::StateError(msg.into())
+    }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -44,7 +51,8 @@ impl std::fmt::Display for Error {
 }
 impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
-        Self::ReadError(value)
+        let kind = value.kind();
+        Self::ReadError(kind)
     }
 }
 impl From<WinnowError> for Error {

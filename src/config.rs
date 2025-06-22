@@ -77,7 +77,7 @@ fn parse(mut input: &str) -> ModalResult<RawConfig> {
     repeat(1.., parse_section).parse_next(input)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Apps {
     pub version: String,
     pub apps: Vec<String>,
@@ -88,7 +88,7 @@ const LINE_ENDING: &str = "\r\n";
 #[cfg(not(windows))]
 const LINE_ENDING: &str = "\n";
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AppSection {
     pub name: String,
     pub details: String,
@@ -132,7 +132,7 @@ impl AppSection {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Config {
     pub apps: Apps,
     pub sections: Vec<AppSection>,
