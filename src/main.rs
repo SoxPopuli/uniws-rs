@@ -4,15 +4,16 @@ mod patch_info;
 mod signature;
 
 use std::{
+    collections::{HashMap, hash_map::Entry},
     fs::File,
-    io::{Read, Write},
+    io::Read,
     path::Path,
 };
 
 use crate::{
     config::{AppSection, Config},
     error::Error,
-    patch_info::PatchInfo,
+    patch_info::PatchStrategy,
 };
 use iced::{
     Length, Task, Theme,
@@ -77,69 +78,57 @@ impl App {
             .and_then(|x: String| Config::new(&x))
     }
 
-    fn apply_patch_to_file(
-        &self,
-        game_dir: &Path,
-        patch_info: &PatchInfo,
-        iteration: usize,
-    ) -> Result<bool, Error> {
-        use std::borrow::Cow;
-
-        let width = self.width.ok_or(Error::state_error("Missing width"))?;
-        let height = self.height.ok_or(Error::state_error("Missing height"))?;
-
-        let mod_file_path = game_dir.join(patch_info.modfile.as_str());
-        let undo_file_path = {
-            let undo_file = patch_info
-                .undofile
-                .as_deref()
-                .map(Cow::Borrowed)
-                .unwrap_or_else(|| {
-                    Cow::Owned(format!(
-                        "{}.undo{}",
-                        mod_file_path.to_string_lossy(),
-                        iteration
-                    ))
-                });
-
-            game_dir.join(&*undo_file)
-        };
-
-        let mut file_data = {
-            let mut file = File::open(&mod_file_path)?;
-            let capacity = file.metadata().map(|m| m.len()).unwrap_or_default();
-            let mut buf = Vec::with_capacity(capacity as usize);
-            file.read_to_end(&mut buf)?;
-            buf
-        };
-
-        patch_info.apply_patch(&mut file_data, width, height)
-            .map_err(|e| Error::config_error(format!("{e}, iteration: {iteration}")))?;
-        std::fs::copy(&mod_file_path, &undo_file_path)?;
-        let mut file = File::options()
-            .write(true)
-            .truncate(true)
-            .open(mod_file_path)?;
-
-        file.write_all(&file_data)?;
-
-        Ok(true)
+    fn read_game_data(path: impl AsRef<Path>) -> Result<Vec<u8>, Error> {
+        let mut file = File::open(path)?;
+        let capacity = file.metadata().map(|m| m.len()).unwrap_or_default();
+        let mut buf = Vec::with_capacity(capacity as usize);
+        file.read_to_end(&mut buf)?;
+        Ok(buf)
     }
 
     fn apply_patches(&self, section: &AppSection) -> Result<bool, Error> {
         if let Some(dir) = self.game_dir.as_deref() {
             let game_path = Path::new(dir);
 
-            let patched_successfully = section
+            let mut game_data_library = HashMap::new();
+
+            let patch_strategies = section
                 .patches
                 .iter()
                 .enumerate()
-                .map(|(i, x)| self.apply_patch_to_file(game_path, x, i))
-                .collect::<Result<Vec<_>, _>>()?
-                .iter()
-                .all(|x| *x);
+                .map(|(i, p)| -> Result<PatchStrategy, Error> {
+                    let data = match game_data_library.entry(p.modfile.as_str()) {
+                        Entry::Vacant(vacant) => {
+                            let path = game_path.join(&p.modfile);
+                            let data = Self::read_game_data(path)?;
+                            vacant.insert(data)
+                        }
+                        Entry::Occupied(o) => o.into_mut(),
+                    };
 
-            Ok(patched_successfully)
+                    let offsets = p.find_patch_offsets(data, i)?;
+                    Ok(PatchStrategy {
+                        base_directory: game_path,
+                        modfile: &p.modfile,
+                        undofile: p.undofile.as_deref(),
+                        offsets,
+                        iteration: i,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let width = self.width.ok_or(Error::state_error("Missing width"))?;
+            let height = self.height.ok_or(Error::state_error("Missing height"))?;
+
+            for s in patch_strategies {
+                let file_data = game_data_library
+                    .get_mut(s.modfile)
+                    .expect("Missing game data?");
+
+                s.apply(file_data, width, height)?
+            }
+
+            Ok(true)
         } else {
             Err(Error::state_error("Missing game dir"))
         }

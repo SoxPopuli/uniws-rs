@@ -1,4 +1,53 @@
+use std::{borrow::Cow, fs::File, io::Write as _, path::Path};
+
 use crate::{config::Items, error::Error, signature::Signature};
+
+/// Index into blob data where patch should be applied
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub struct PatchOffsets {
+    pub xoffset: Option<usize>,
+    pub yoffset: Option<usize>,
+}
+
+#[derive(Debug)]
+pub struct PatchStrategy<'a, 'b> {
+    pub base_directory: &'a Path,
+    pub modfile: &'b str,
+    pub undofile: Option<&'b str>,
+    pub offsets: Vec<PatchOffsets>,
+    pub iteration: usize,
+}
+impl<'a, 'b> PatchStrategy<'a, 'b> {
+    fn patch_data(&self, file_data: &mut [u8], x_res: u16, y_res: u16) {
+        apply_patches(file_data, &self.offsets, x_res, y_res);
+    }
+
+    pub fn apply(&self, file_data: &mut [u8], width: u16, height: u16) -> Result<(), Error> {
+        let mod_file_path = self.base_directory.join(self.modfile);
+        let undo_file_path = {
+            let undo_file = self.undofile.map(Cow::Borrowed).unwrap_or_else(|| {
+                Cow::Owned(format!(
+                    "{}.undo{}",
+                    mod_file_path.to_string_lossy(),
+                    self.iteration
+                ))
+            });
+
+            self.base_directory.join(&*undo_file)
+        };
+
+        self.patch_data(file_data, width, height);
+
+        std::fs::copy(&mod_file_path, &undo_file_path)?;
+        let mut file = File::options()
+            .write(true)
+            .truncate(true)
+            .open(mod_file_path)?;
+        file.write_all(file_data)?;
+
+        Ok(())
+    }
+}
 
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct PatchInfo {
@@ -69,36 +118,40 @@ impl PatchInfo {
         })
     }
 
-    /// Returns `true` if applied successfully
-    pub fn apply_patch(&self, data: &mut [u8], x_res: u16, y_res: u16) -> Result<(), Error> {
-        // let mut data = data;
+    /// **NOTE**: find all offsets before doing any patching
+    pub fn find_patch_offsets(
+        &self,
+        data: &[u8],
+        iteration: usize,
+    ) -> Result<Vec<PatchOffsets>, Error> {
+        (0..self.occur as usize)
+            .map(|_| {
+                self.signature
+                    .try_find(data)
+                    .map(|index| PatchOffsets {
+                        xoffset: self.xoffset.map(|x| index + x as usize),
+                        yoffset: self.yoffset.map(|y| index + y as usize),
+                    })
+                    .ok_or(Error::PatchError { iteration })
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+}
 
-        for _ in 0..self.occur {
-            match self.signature.try_find(data) {
-                Some(index) => {
-                    let x_bytes = x_res.to_le_bytes();
-                    let y_bytes = y_res.to_le_bytes();
+pub fn apply_patches(data: &mut [u8], patch_offsets: &[PatchOffsets], x_res: u16, y_res: u16) {
+    for PatchOffsets { xoffset, yoffset } in patch_offsets {
+        let x_bytes = x_res.to_le_bytes();
+        let y_bytes = y_res.to_le_bytes();
 
-                    if let Some(xoffset) = self.xoffset {
-                        let x_offset = index + xoffset as usize;
-
-                        data[x_offset] = x_bytes[0];
-                        data[x_offset + 1] = x_bytes[1];
-                    }
-
-                    if let Some(yoffset) = self.yoffset {
-                        let y_offset = index + yoffset as usize;
-
-                        data[y_offset] = y_bytes[0];
-                        data[y_offset + 1] = y_bytes[1];
-                    }
-
-                    // data = &mut data[index + self.signature.pattern.len()..];
-                }
-                None => return Err(Error::config_error("Failed to apply patch")),
-            }
+        if let Some(x_offset) = xoffset {
+            data[*x_offset] = x_bytes[0];
+            data[*x_offset + 1] = x_bytes[1];
         }
-        Ok(())
+
+        if let Some(y_offset) = yoffset {
+            data[*y_offset] = y_bytes[0];
+            data[*y_offset + 1] = y_bytes[1];
+        }
     }
 }
 
@@ -201,7 +254,8 @@ mod tests {
             0x80, 0x02, 0x00, 0x00, 0xC7, 0x01, 0xE0, 0x01, 0x00, 0x00,
         ];
 
-        assert!(info.apply_patch(&mut data, 1920, 1080).is_ok());
+        let offsets = info.find_patch_offsets(&data, 0).unwrap();
+        apply_patches(&mut data, &offsets, 1920, 1080);
 
         #[rustfmt::skip]
         assert_eq!(data.as_slice(), [

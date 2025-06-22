@@ -18,6 +18,7 @@ pub enum Error {
     ParseError(WinnowError),
     ConfigError(ConfigError),
     StateError(String),
+    PatchError { iteration: usize },
 }
 impl Error {
     pub fn config_missing_field(section: impl Into<String>, field: &'static str) -> Self {
