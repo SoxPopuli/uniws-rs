@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fs::File, io::Write as _, path::Path};
+use std::{fs::File, io::Write as _, path::Path};
 
 use crate::{config::Items, error::Error, signature::Signature};
 
@@ -7,15 +7,15 @@ use crate::{config::Items, error::Error, signature::Signature};
 pub struct PatchOffsets {
     pub xoffset: Option<usize>,
     pub yoffset: Option<usize>,
+    pub setx: Option<u16>,
+    pub sety: Option<u16>,
 }
 
 #[derive(Debug)]
 pub struct PatchStrategy<'a, 'b> {
     pub base_directory: &'a Path,
     pub modfile: &'b str,
-    pub undofile: Option<&'b str>,
     pub offsets: Vec<PatchOffsets>,
-    pub iteration: usize,
 }
 impl<'a, 'b> PatchStrategy<'a, 'b> {
     fn patch_data(&self, file_data: &mut [u8], x_res: u16, y_res: u16) {
@@ -25,20 +25,16 @@ impl<'a, 'b> PatchStrategy<'a, 'b> {
     pub fn apply(&self, file_data: &mut [u8], width: u16, height: u16) -> Result<(), Error> {
         let mod_file_path = self.base_directory.join(self.modfile);
         let undo_file_path = {
-            let undo_file = self.undofile.map(Cow::Borrowed).unwrap_or_else(|| {
-                Cow::Owned(format!(
-                    "{}.undo{}",
-                    mod_file_path.to_string_lossy(),
-                    self.iteration
-                ))
-            });
-
-            self.base_directory.join(&*undo_file)
+            let undo_file = format!("{}.undo", mod_file_path.to_string_lossy());
+            self.base_directory.join(&undo_file)
         };
 
         self.patch_data(file_data, width, height);
 
-        std::fs::copy(&mod_file_path, &undo_file_path)?;
+        if !undo_file_path.exists() {
+            std::fs::copy(&mod_file_path, &undo_file_path)?;
+        }
+
         let mut file = File::options()
             .write(true)
             .truncate(true)
@@ -131,6 +127,8 @@ impl PatchInfo {
                     .map(|index| PatchOffsets {
                         xoffset: self.xoffset.map(|x| index + x as usize),
                         yoffset: self.yoffset.map(|y| index + y as usize),
+                        setx: self.setx,
+                        sety: self.sety,
                     })
                     .ok_or(Error::PatchError { iteration })
             })
@@ -139,9 +137,21 @@ impl PatchInfo {
 }
 
 pub fn apply_patches(data: &mut [u8], patch_offsets: &[PatchOffsets], x_res: u16, y_res: u16) {
-    for PatchOffsets { xoffset, yoffset } in patch_offsets {
-        let x_bytes = x_res.to_le_bytes();
-        let y_bytes = y_res.to_le_bytes();
+    for PatchOffsets {
+        xoffset,
+        yoffset,
+        setx,
+        sety,
+    } in patch_offsets
+    {
+        let x_bytes = match setx {
+            Some(x) => x.to_le_bytes(),
+            None => x_res.to_le_bytes(),
+        };
+        let y_bytes = match sety {
+            Some(y) => y.to_le_bytes(),
+            None => y_res.to_le_bytes(),
+        };
 
         if let Some(x_offset) = xoffset {
             data[*x_offset] = x_bytes[0];

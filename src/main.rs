@@ -110,9 +110,7 @@ impl App {
                     Ok(PatchStrategy {
                         base_directory: game_path,
                         modfile: &p.modfile,
-                        undofile: p.undofile.as_deref(),
                         offsets,
-                        iteration: i,
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
